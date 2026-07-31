@@ -1,0 +1,68 @@
+# =============================================================
+# AI Narrative Video Director — configuration
+# Nothing is hardcoded: provider, models and API keys are all
+# chosen here. API keys are NEVER stored in this file — set the
+# env var named by `api_key_env` (a .env file is also loaded).
+# =============================================================
+
+llm:
+  # provider: openrouter | anthropic | openai | custom
+  #   openrouter -> https://openrouter.ai/api/v1   (OpenAI-compatible)
+  #   anthropic  -> native Anthropic Messages API
+  #   openai     -> https://api.openai.com/v1
+  #   custom     -> set base_url yourself (any OpenAI-compatible server)
+  provider: openrouter
+  base_url: null                 # override only for provider: custom
+  api_key_env: OPENROUTER_API_KEY
+  # Model ids are provider-specific, e.g.
+  #   openrouter: anthropic/claude-sonnet-4.5, anthropic/claude-opus-4.5, ...
+  #   anthropic:  claude-sonnet-5, claude-opus-5, ...
+  text_model: anthropic/claude-sonnet-4.5
+  vision_model: anthropic/claude-sonnet-4.5
+  temperature: 0.0               # deterministic outputs
+  max_tokens: 4096
+  max_retries: 3
+  timeout_s: 120
+
+transcription:
+  model_size: small              # tiny | base | small | medium | large-v3
+  language: null                 # null = auto-detect
+  device: auto                   # auto | cpu | cuda
+  compute_type: auto             # auto | int8 | float16 ...
+
+analysis:
+  grid_sample_frames: 16         # frames sampled for grid detection
+  motion_fps: 4.0                # fps for lip/motion activity analysis
+  vision_interval_s: 8.0         # seconds between frames sent to vision LLM
+  vision_tile_width: 512         # tile crops downscaled to this width
+  max_vision_calls: 150          # hard cost guard for vision LLM calls
+  freeze_min_s: 1.0              # tile static for >= this => camera freeze
+  face_min_activity: 0.15        # min normalized lip activity to call a speaker
+
+editing:
+  show_type_file: show_type.txt  # relative to the video's folder, then CWD
+  min_shot_s: 2.0
+  reaction_min_s: 3.0
+  reaction_max_s: 5.0
+  refresh_after_s: 45.0
+  refresh_wide_s: 3.0
+  rapid_turn_s: 4.0              # avg turn length below this = rapid dialogue
+  rapid_turns_window: 4          # consecutive short turns to trigger wide/SBS
+  monologue_min_s: 30.0
+  monologue_alt_every_s: 25.0    # insert alternate angle in long monologues
+  wide_budget: 0.20              # Nav Thethi: wide usage must stay below this
+  word_gap_safe_s: 0.25          # min silence between words for a safe cut
+
+hitl:
+  enabled: true                  # human-in-the-loop checkpoints
+  # cameras  -> confirm/override detected camera roles
+  # speakers -> confirm/override host/guest mapping
+  # cuts     -> review the cut list before XML is generated
+  checkpoints: [cameras, speakers, cuts]
+
+output:
+  dir: output
+  fcpxml: output.fcpxml          # FCPXML v1.10 (brief's literal spec)
+  premiere_xml: output_premiere.xml  # FCP7 xmeml (guaranteed Premiere import)
+  report: editing_report.json
+  cache_dir: .cache              # per-stage results; delete to force re-run

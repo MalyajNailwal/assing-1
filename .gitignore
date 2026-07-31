@@ -1,0 +1,17 @@
+# secrets — never commit API keys
+.env
+
+# generated artifacts
+.cache/
+output/
+test_media/
+__pycache__/
+*.pyc
+
+# media (SyncMaster footage stays local)
+*.mp4
+*.mov
+*.mkv
+*.mxf
+*.wav
+*.aiff
