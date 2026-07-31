@@ -151,10 +151,11 @@ def build_cut_list(
         return None
 
     def neutral_shot(start: float, end: float, rule: str, reason: str, locked=False) -> Shot:
-        """Wide when available; SBS on Maturity Code; else the busiest hero."""
+        """Wide when available; else SBS of both heroes (the only 'wider
+        composition' possible without a wide cam); else the fallback hero."""
         if wide:
             return Shot(start, end, "single", [wide], rule, reason, locked)
-        if show_type == SHOW_MATURITY and host and guest:
+        if host and guest:
             return Shot(start, end, "sbs", [host, guest], rule, reason, locked)
         return Shot(start, end, "single", [fallback], rule, reason, locked)
 
@@ -232,17 +233,30 @@ def build_cut_list(
     # ---- pass 4: long monologues (Rule 5) --------------------------------------
     mono_min = float(ed.get("monologue_min_s", 30.0))
     alt_every = float(ed.get("monologue_alt_every_s", 25.0))
+    alternates: dict[str, list[str]] = inventory.get("alternates", {})
     for t in turns:
         if t["end"] - t["start"] < mono_min:
             continue
-        alt_cam = listener_of(t["cam"]) or wide
-        if not alt_cam:
+        # variety pool: speaker's own ALT angles (stay with the storyteller),
+        # then the listener, then the wide
+        pool = list(alternates.get(t["cam"], []))
+        if listener_of(t["cam"]):
+            pool.append(listener_of(t["cam"]))
+        if wide:
+            pool.append(wide)
+        if not pool:
             continue
         at = t["start"] + alt_every
+        k = 0
         while at + 4.0 < t["end"] - 5.0:
-            if not in_hold(at, at + 4.0):
+            alt_cam = pool[k % len(pool)]
+            # during emotional holds, an ALT angle of the SAME speaker is
+            # allowed (stays on the storyteller); cutting away is not
+            same_person = alt_cam in alternates.get(t["cam"], [])
+            if same_person or not in_hold(at, at + 4.0):
                 _overlay(timeline, Shot(at, at + 4.0, "single", [alt_cam],
                                         "MONOLOGUE_RULE", "long monologue — alternate angle"))
+                k += 1
             at += alt_every
 
     # ---- pass 5: listener reactions (Rule 2) ------------------------------------
@@ -292,6 +306,8 @@ def build_cut_list(
         if cur is None or ev["camera"] not in cur.cameras or cur.kind == "sbs":
             continue  # offender not on screen — nothing to cut away from
         away = listener_of(ev["camera"]) or wide
+        if not away:  # last resort: a different angle of the same person
+            away = next(iter(inventory.get("alternates", {}).get(ev["camera"], [])), None)
         if not away:
             warnings.append(f"PHY_ADJ at {t0:.1f}s ({ev['detail']}) but no alternate camera available")
             continue

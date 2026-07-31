@@ -23,13 +23,15 @@ ROLE_PROMPT = """You are analyzing a multicam podcast "SyncMaster" recording. Th
 
 For EACH camera tile, classify:
 - "role": one of "HERO" (close-up/medium of ONE person), "WIDE" (shows two or more people / the whole set), "EMPTY" (black, color bars, no signal, or an empty chair/no person), "OTHER" (screen share, graphics, b-roll)
+- "person_id": a letter ("A", "B", ...) — tiles showing the SAME person must share the same letter; null if no person. Multiple camera angles of one person are common.
+- "tightness": "close" | "medium" | "wide" — how tight the framing on the person is
 - "person_count": integer number of visible people
 - "person_desc": short visual description of the person(s) (clothing, hair, position) or "" if none
-- "likely_host": true/false/null — your best guess whether this person is the show HOST (hosts often face the guest, sit screen-left, have branded mics/notes). Use null when unsure.
+- "likely_host": true/false/null — your best guess whether this person is the show HOST (hosts often face the guest, have branded mics/notes). Use null when unsure.
 - "confidence": 0.0-1.0
 
 Reply with ONLY a JSON object:
-{"tiles": [{"id": "cam_1", "role": "...", "person_count": 0, "person_desc": "...", "likely_host": null, "confidence": 0.0}, ...],
+{"tiles": [{"id": "cam_1", "role": "...", "person_id": null, "tightness": "medium", "person_count": 0, "person_desc": "...", "likely_host": null, "confidence": 0.0}, ...],
  "notes": "anything unusual about the layout"}"""
 
 GRID_FALLBACK_PROMPT = """This frame is a multicam "SyncMaster" recording: several camera feeds composited into one frame, usually in a uniform grid. Tell me the layout.
@@ -104,6 +106,46 @@ def detect_grid(frames: list[np.ndarray], llm: LLMClient | None = None) -> tuple
     return 1, 1, 0.3
 
 
+def detect_content_tiles(frames: list[np.ndarray]) -> list[tuple[int, int, int, int]] | None:
+    """Freeform layouts: tiles are content regions on a uniform background
+    (white/black margins). Returns rects in reading order, or None if the
+    layout looks like a margin-less uniform grid (caller falls back)."""
+    stack = np.stack([f.astype(np.float32) for f in frames])
+    mean = stack.mean(axis=0)
+    motion = np.abs(np.diff(stack, axis=0)).mean(axis=(0, 3))
+
+    h, w = mean.shape[:2]
+    border = np.concatenate(
+        [mean[0:4].reshape(-1, 3), mean[-4:].reshape(-1, 3),
+         mean[:, 0:4].reshape(-1, 3), mean[:, -4:].reshape(-1, 3)]
+    )
+    bg = np.median(border, axis=0)
+    dist = np.linalg.norm(mean - bg, axis=2)
+    mask = ((dist > 30) | (motion > 2.0)).astype(np.uint8) * 255
+
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+    boxes = []
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        if bw < w * 0.08 or bh < h * 0.08 or area < w * h * 0.01:
+            continue
+        boxes.append((int(x), int(y), int(bw), int(bh)))
+    if len(boxes) < 2:
+        return None
+    union = sum(bw * bh for _, _, bw, bh in boxes)
+    biggest = max(bw * bh for _, _, bw, bh in boxes)
+    if biggest > 0.85 * w * h:  # one giant region == margin-less grid
+        return None
+    if union > 0.98 * w * h:
+        return None
+    # reading order: band rows by y-center, then left-to-right
+    boxes.sort(key=lambda b: (round((b[1] + b[3] / 2) / (h * 0.22)), b[0]))
+    return boxes
+
+
 def tile_rects(width: int, height: int, rows: int, cols: int) -> list[tuple[int, int, int, int]]:
     rects = []
     for r in range(rows):
@@ -159,15 +201,26 @@ def discover_cameras(cfg: Config, info: MediaInfo, llm: LLMClient) -> dict:
     if not valid:
         raise RuntimeError("Could not decode any frames from the video")
 
-    rows, cols, grid_conf = detect_grid(valid, llm)
-    rects = tile_rects(info.width, info.height, rows, cols)
+    # freeform layout first (tiles on a background), uniform grid as fallback
+    rects = detect_content_tiles(valid)
+    if rects is not None:
+        rows, cols, grid_conf = 0, 0, 0.9
+        layout = "freeform"
+    else:
+        rows, cols, grid_conf = detect_grid(valid, llm)
+        rects = tile_rects(info.width, info.height, rows, cols)
+        layout = "grid"
 
     tiles = []
     mid = valid[len(valid) // 2]
     for i, rect in enumerate(rects):
         stats = _tile_stats(valid, rect)
-        crop = crop_tile(mid, rect)
-        face = detect_face(crop)
+        # face box: try several frames (hands/turned heads defeat single-frame detection)
+        face = None
+        for f in valid[len(valid) // 2 :: 2] + valid[: len(valid) // 2 : 2]:
+            face = detect_face(crop_tile(f, rect))
+            if face:
+                break
         # empty heuristics: nearly black, or nearly static AND featureless
         empty = (stats["luma_mean"] < 12 and stats["luma_std"] < 8) or (
             stats["motion"] < 0.15 and stats["luma_std"] < 6
@@ -187,7 +240,7 @@ def discover_cameras(cfg: Config, info: MediaInfo, llm: LLMClient) -> dict:
     sheet = contact_sheet(
         [crop_tile(mid, tuple(t["rect"])) for t in tiles],
         [t["id"] for t in tiles],
-        cols=cols,
+        cols=cols or 3,
     )
     ans = llm.ask_json(ROLE_PROMPT, images_png=[png_bytes(sheet)])
     llm_tiles = {t.get("id"): t for t in ans.get("tiles", [])}
@@ -202,6 +255,8 @@ def discover_cameras(cfg: Config, info: MediaInfo, llm: LLMClient) -> dict:
                 warnings.append(f"{t['id']}: LLM said {role} but tile is black — marking EMPTY")
                 role = "EMPTY"
         t["role"] = role
+        t["person_id"] = lt.get("person_id")
+        t["tightness"] = lt.get("tightness", "medium")
         t["person_count"] = int(lt.get("person_count", 0) or 0)
         t["person_desc"] = lt.get("person_desc", "")
         t["likely_host"] = lt.get("likely_host", None)
@@ -212,11 +267,32 @@ def discover_cameras(cfg: Config, info: MediaInfo, llm: LLMClient) -> dict:
     if not heroes:
         warnings.append("No HERO cameras detected — check camera mapping at the HITL checkpoint")
     if not wides:
-        warnings.append("No WIDE camera detected — refresh/dialogue rules will fall back to heroes")
+        warnings.append("No WIDE camera detected — refresh/dialogue rules will fall back to heroes/SBS")
+
+    # Multiple angles of the same person: the tightest, highest-confidence
+    # angle is that person's primary HERO; the rest become ALT angles.
+    tightness_rank = {"close": 0, "medium": 1, "wide": 2}
+    by_person: dict[str, list[dict]] = {}
+    for t in heroes:
+        by_person.setdefault(t.get("person_id") or t["id"], []).append(t)
+    alternates: dict[str, list[str]] = {}
+    primaries: list[dict] = []
+    for pid, group in by_person.items():
+        group.sort(key=lambda t: (tightness_rank.get(t.get("tightness"), 1), -t["confidence"]))
+        primary, alts = group[0], group[1:]
+        for a in alts:
+            a["role"] = "ALT"
+        alternates[primary["id"]] = [a["id"] for a in alts]
+        primaries.append(primary)
+        if alts:
+            warnings.append(
+                f"person {pid}: {len(group)} angles — {primary['id']} is primary HERO, "
+                f"{[a['id'] for a in alts]} kept as ALT angles"
+            )
 
     # Provisional named assignment (finalized in Stage 2 + HITL)
     assignments: dict[str, str] = {}
-    host_first = sorted(heroes, key=lambda t: (t.get("likely_host") is not True, -t["confidence"]))
+    host_first = sorted(primaries, key=lambda t: (t.get("likely_host") is not True, -t["confidence"]))
     if host_first:
         assignments["CAM_HOST_HERO"] = host_first[0]["id"]
     if len(host_first) > 1:
@@ -225,7 +301,8 @@ def discover_cameras(cfg: Config, info: MediaInfo, llm: LLMClient) -> dict:
         assignments["CAM_WIDE"] = max(wides, key=lambda t: t["confidence"])["id"]
 
     return {
-        "grid": {"rows": rows, "cols": cols, "confidence": round(float(grid_conf), 2)},
+        "grid": {"rows": rows, "cols": cols, "layout": layout, "confidence": round(float(grid_conf), 2)},
+        "alternates": alternates,
         "video": {"width": info.width, "height": info.height, "fps": info.fps},
         "tiles": tiles,
         "assignments": assignments,

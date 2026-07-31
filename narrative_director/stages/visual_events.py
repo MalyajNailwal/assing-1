@@ -45,7 +45,7 @@ def detect_freezes(motion: dict, inventory: dict, cfg: Config) -> list[dict]:
     """Tile static for >= freeze_min_s while other tiles move => frozen camera."""
     fps = motion["fps"]
     min_len = int(float(cfg.analysis.get("freeze_min_s", 1.0)) * fps)
-    active = [t["id"] for t in inventory["tiles"] if t["role"] in ("HERO", "WIDE")]
+    active = [t["id"] for t in inventory["tiles"] if t["role"] in ("HERO", "WIDE", "ALT")]
     events = []
     for cam in active:
         series = motion["tile"][cam]
