@@ -75,6 +75,23 @@ def build_utterances(transcript: dict, max_gap_s: float = 1.0) -> list[dict]:
     return utterances
 
 
+def segments_as_units(transcript: dict) -> list[dict]:
+    """Whisper segments as speaker-assignment units (fine-grained: real
+    conversation flips speakers too fast for gap-merged utterances)."""
+    units = []
+    for seg in transcript["segments"]:
+        units.append(
+            {
+                "id": len(units),
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": seg["text"],
+                "words": list(seg["words"]),
+            }
+        )
+    return units
+
+
 def all_words(transcript: dict) -> list[dict]:
     words = [w for seg in transcript["segments"] for w in seg["words"]]
     return sorted(words, key=lambda w: w["s"])

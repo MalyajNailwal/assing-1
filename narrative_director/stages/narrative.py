@@ -21,7 +21,7 @@ STOP_PATTERNS = [
 ]
 RESTART_PATTERNS = [
     r"\brestart\s+(?:the\s+)?rolling\b",
-    r"\bstart\s+(?:the\s+)?rolling\s+again\b",
+    r"\bstart\s+(?:the\s+)?rolling\b",
     r"\bwe(?:'|\s+a)re\s+rolling\s+again\b",
 ]
 
@@ -70,7 +70,11 @@ def find_off_camera_segments(words: list[dict], duration_s: float) -> list[dict]
     marks: list[tuple[float, str]] = []
     for pat in STOP_PATTERNS:
         for m in re.finditer(pat, joined):
-            marks.append((word_at(m.start())["s"], "stop"))
+            # "... rolling again" while stopped means RESUME — ASR often
+            # mishears "start rolling again" as "stop rolling again", and
+            # you cannot stop what is already stopped (state resolves it)
+            kind = "ambiguous" if joined[m.end() : m.end() + 7].startswith(" again") else "stop"
+            marks.append((word_at(m.start())["s"], kind))
     for pat in RESTART_PATTERNS:
         for m in re.finditer(pat, joined):
             marks.append((word_at(m.end() - 1)["e"], "restart"))
@@ -78,6 +82,8 @@ def find_off_camera_segments(words: list[dict], duration_s: float) -> list[dict]
 
     segments, open_at = [], None
     for t, kind in marks:
+        if kind == "ambiguous":
+            kind = "restart" if open_at is not None else "stop"
         if kind == "stop" and open_at is None:
             open_at = t
         elif kind == "restart" and open_at is not None:

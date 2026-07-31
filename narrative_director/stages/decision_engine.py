@@ -383,7 +383,9 @@ def apply_safety(
 
     moved = 0
     for prev, cur in zip(timeline, timeline[1:]):
-        window = 0.3 if (prev.locked or cur.locked) else 0.7
+        # continuous speech rarely has safe gaps nearby: give unlocked cuts a
+        # wide search window; locked (mandatory) cuts must stay ~immediate
+        window = 0.3 if (prev.locked or cur.locked) else 1.5
         t = snap(cur.start, window)
         lo = prev.start + 0.5
         hi = cur.end - 0.5

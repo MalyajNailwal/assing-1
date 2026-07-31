@@ -121,8 +121,13 @@ def map_speakers(
     hero_ids = [t["id"] for t in inventory["tiles"] if t["role"] == "HERO"]
     if not hero_ids:
         hero_ids = [t["id"] for t in inventory["tiles"] if not t.get("empty_heuristic")]
-    z = {cam: _zscore(motion["mouth"][cam]) for cam in hero_ids}
-    min_act = float(cfg.analysis.get("face_min_activity", 0.15))
+    # combined evidence: mouth-region activity + whole-tile activity (speakers
+    # gesture and move their head, listeners sit still) — validated against
+    # ground-truth frames; mouth-only misses quiet talkers
+    mz = {cam: _zscore(motion["mouth"][cam]) for cam in hero_ids}
+    tz = {cam: _zscore(motion["tile"][cam]) for cam in hero_ids}
+    min_act = float(cfg.analysis.get("face_min_activity", 0.05))
+    min_margin = 0.15
 
     warnings = []
     for u in utterances:
@@ -130,28 +135,52 @@ def map_speakers(
         i1 = max(i0 + 1, int(u["end"] * fps))
         scores = {}
         for cam in hero_ids:
-            series = z[cam]
-            if i0 >= len(series):
+            if i0 >= len(mz[cam]):
                 continue
-            scores[cam] = float(series[i0 : min(i1, len(series))].mean())
+            m = float(mz[cam][i0 : min(i1, len(mz[cam]))].mean())
+            t = float(tz[cam][i0 : min(i1, len(tz[cam]))].mean())
+            scores[cam] = 0.5 * m + 0.5 * t
         if not scores:
             u["tile"], u["speaker_conf"] = "unknown", 0.0
             continue
         best = max(scores, key=scores.get)  # type: ignore[arg-type]
         ranked = sorted(scores.values(), reverse=True)
         margin = ranked[0] - ranked[1] if len(ranked) > 1 else ranked[0]
-        if scores[best] < min_act:
-            u["tile"] = "unknown"  # off-camera voice (producer, crew)
+        if scores[best] < min_act and margin < min_margin:
+            u["tile"] = "unknown"  # off-camera voice, or nobody clearly active
             u["speaker_conf"] = 0.0
         else:
             u["tile"] = best
             u["speaker_conf"] = round(min(1.0, max(0.0, margin)), 2)
 
-    # smooth: single-utterance blips between two same-tile neighbors
-    for i in range(1, len(utterances) - 1):
-        a, b, c = utterances[i - 1], utterances[i], utterances[i + 1]
-        if b["tile"] != a["tile"] and a["tile"] == c["tile"] and b["speaker_conf"] < 0.1 and b["end"] - b["start"] < 2.0:
-            b["tile"] = a["tile"]
+    # smooth: (a) low-confidence single blips between same-tile neighbors,
+    # (b) unknowns sandwiched between the same tile inherit it
+    changed = True
+    while changed:
+        changed = False
+        for i in range(1, len(utterances) - 1):
+            a, b, c = utterances[i - 1], utterances[i], utterances[i + 1]
+            if a["tile"] == c["tile"] and a["tile"] != "unknown" and b["tile"] != a["tile"]:
+                blip = b["speaker_conf"] < 0.1 and b["end"] - b["start"] < 2.0
+                if b["tile"] == "unknown" or blip:
+                    b["tile"] = a["tile"]
+                    b["speaker_conf"] = 0.05
+                    changed = True
+    # hysteresis: switching speakers needs stronger evidence than continuing
+    # (a wrong switch cuts to a listener mid-sentence; holding is safer)
+    switch_margin = 0.25
+    for i in range(1, len(utterances)):
+        prev, cur = utterances[i - 1], utterances[i]
+        if (
+            cur["tile"] != "unknown"
+            and prev["tile"] != "unknown"
+            and cur["tile"] != prev["tile"]
+            and cur["speaker_conf"] < switch_margin
+            and cur["start"] - prev["end"] < 1.5
+        ):
+            cur["tile"] = prev["tile"]
+            cur["speaker_conf"] = 0.05
+
     unknown_ratio = sum(1 for u in utterances if u["tile"] == "unknown") / max(1, len(utterances))
     if unknown_ratio > 0.25:
         warnings.append(

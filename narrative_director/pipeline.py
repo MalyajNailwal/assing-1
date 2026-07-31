@@ -25,7 +25,7 @@ from .stages import decision_engine as de
 from .stages.camera_discovery import discover_cameras
 from .stages.narrative import analyze_narrative
 from .stages.speakers import compute_motion_series, map_speakers
-from .stages.transcribe import all_words, build_utterances, transcribe
+from .stages.transcribe import all_words, segments_as_units, transcribe
 from .stages.validate import validate
 from .stages.visual_events import detect_visual_events
 from .stages.xml_fcp7 import write_fcp7_xml
@@ -106,7 +106,7 @@ class Pipeline:
             extract_audio_wav(self.video, wav)
         transcript = self._cached("02_transcript", lambda: transcribe(cfg, wav))
         words = all_words(transcript)
-        utterances = build_utterances(transcript)
+        utterances = segments_as_units(transcript)
         if not utterances:
             all_warnings.append("No speech detected — producing a wide-shot-only timeline")
         motion = self._cached_motion(info, inventory)
